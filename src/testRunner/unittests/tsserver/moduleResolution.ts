@@ -8,9 +8,11 @@ import {
     getFsContentsForAlternateResultPackageJson,
 } from "../helpers/alternateResult.js";
 import { libContent } from "../helpers/contents.js";
+import { forEachPackageJsonScopeScenario } from "../helpers/packageJsonScope.js";
 import { solutionBuildWithBaseline } from "../helpers/solutionBuilder.js";
 import {
     baselineTsserverLogs,
+    forEachTscWatchEdit,
     openFilesForSession,
     protocolTextSpanFromSubstring,
     TestSession,
@@ -309,4 +311,16 @@ describe("unittests:: tsserver:: moduleResolution", () => {
             });
         }
     });
+
+    forEachPackageJsonScopeScenario(
+        /*forTsserver*/ true,
+        (scenario, getHost, edits, _project, mainFile) =>
+            it(scenario, () => {
+                const host = getHost();
+                const session = new TestSession(host);
+                openFilesForSession([mainFile], session);
+                forEachTscWatchEdit(session, edits(), ts.noop);
+                baselineTsserverLogs("moduleResolution", scenario, session);
+            }),
+    );
 });

@@ -6,6 +6,7 @@ import {
     getFsContentsForAlternateResultDts,
     getFsContentsForAlternateResultPackageJson,
 } from "../helpers/alternateResult.js";
+import { forEachPackageJsonScopeScenario } from "../helpers/packageJsonScope.js";
 import { verifyTscWatch } from "../helpers/tscWatch.js";
 import {
     createWatchedSystem,
@@ -712,4 +713,16 @@ describe("unittests:: tsc-watch:: moduleResolution::", () => {
             },
         ],
     });
+
+    forEachPackageJsonScopeScenario(
+        /*forTsserver*/ false,
+        (subScenario, sys, edits, project) =>
+            verifyTscWatch({
+                scenario: "moduleResolution",
+                subScenario,
+                commandLineArgs: ["-w", "-p", project, "--explainFiles", "--extendedDiagnostics"],
+                sys,
+                edits: edits(),
+            }),
+    );
 });
