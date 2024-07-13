@@ -292,8 +292,8 @@ function createResolvedModuleWithFailedLookupLocations(
         alternateResult,
     };
 }
-function initializeResolutionField<T>(value: T[]): T[] | undefined {
-    return value.length ? value : undefined;
+function initializeResolutionField<T>(value: T[] | undefined): T[] | undefined {
+    return value?.length ? value : undefined;
 }
 /** @internal */
 export function updateResolutionField<T>(to: T[] | undefined, value: T[] | undefined) {
@@ -303,9 +303,9 @@ export function updateResolutionField<T>(to: T[] | undefined, value: T[] | undef
     return to;
 }
 
-function initializeResolutionFieldForReadonlyCache<T>(fromCache: T[] | undefined, value: T[]): T[] | undefined {
+function initializeResolutionFieldForReadonlyCache<T>(fromCache: T[] | undefined, value: T[] | undefined): T[] | undefined {
     if (!fromCache?.length) return initializeResolutionField(value);
-    if (!value.length) return fromCache.slice();
+    if (!value?.length) return fromCache.slice();
     return [...fromCache, ...value];
 }
 
@@ -887,6 +887,7 @@ export interface NonRelativeNameResolutionCache<T> {
 export interface PerNonRelativeNameCache<T> {
     get(directory: string): T | undefined;
     set(directory: string, result: T): void;
+    /** @internal */ clear(): void;
     /** @internal */ isReadonly?: boolean;
 }
 
@@ -924,10 +925,23 @@ export function isMissingPackageJsonInfo(entry: PackageJsonInfoCacheEntry | unde
     return !!entry && !(entry as PackageJsonInfo).contents;
 }
 
+/** @internal */
+export interface PackageJsonScope {
+    contents: PackageJsonInfoContents | undefined;
+    failedLookupLocations?: string[];
+    affectingLocations?: string[];
+}
+/** @internal */
+export function getPackageJsonLocationFromScope(scope: PackageJsonScope) {
+    return lastOrUndefined(scope.affectingLocations);
+}
+
 export interface PackageJsonInfoCache {
     /** @internal */ getPackageJsonInfo(packageJsonPath: string): PackageJsonInfoCacheEntry | undefined;
     /** @internal */ setPackageJsonInfo(packageJsonPath: string, info: PackageJsonInfoCacheEntry): void;
     /** @internal */ getInternalMap(): Map<Path, PackageJsonInfoCacheEntry> | undefined;
+    /** @internal */ getPackageJsonScope(dir: string): PackageJsonScope | undefined;
+    /** @internal */ setPackageJsonScope(dir: string, scope: PackageJsonScope): void;
     clear(): void;
     /** @internal */ isReadonly?: boolean;
 }
@@ -1042,8 +1056,20 @@ function createCacheWithRedirects<K, V>(ownOptions: CompilerOptions | undefined,
 }
 
 function createPackageJsonInfoCache(currentDirectory: string, getCanonicalFileName: (s: string) => string): PackageJsonInfoCache {
+    const packageJsonScopes = createPerNonRelativeNameCache(
+        currentDirectory,
+        getCanonicalFileName,
+        getPackageJsonLocationFromScope,
+    );
     let cache: Map<Path, PackageJsonInfoCacheEntry> | undefined;
-    return { getPackageJsonInfo, setPackageJsonInfo, clear, getInternalMap };
+    return {
+        getPackageJsonInfo,
+        setPackageJsonInfo,
+        getPackageJsonScope,
+        setPackageJsonScope,
+        clear,
+        getInternalMap,
+    };
     function getPackageJsonInfo(packageJsonPath: string) {
         return cache?.get(toPath(packageJsonPath, currentDirectory, getCanonicalFileName));
     }
@@ -1052,9 +1078,16 @@ function createPackageJsonInfoCache(currentDirectory: string, getCanonicalFileNa
     }
     function clear() {
         cache = undefined;
+        packageJsonScopes.clear();
     }
     function getInternalMap() {
         return cache;
+    }
+    function getPackageJsonScope(dir: string) {
+        return packageJsonScopes.get(dir);
+    }
+    function setPackageJsonScope(dir: string, scope: PackageJsonScope) {
+        packageJsonScopes.set(dir, scope); // TODO:: handle readonly
     }
 }
 
@@ -1156,6 +1189,85 @@ function getOriginalOrResolvedTypeReferenceFileName(result: ResolvedTypeReferenc
         (result.resolvedTypeReferenceDirective.originalPath || result.resolvedTypeReferenceDirective.resolvedFileName);
 }
 
+function createPerNonRelativeNameCache<T>(
+    currentDirectory: string,
+    getCanonicalFileName: (s: string) => string,
+    getResolvedFileName: (result: T) => string | undefined,
+): PerNonRelativeNameCache<T> {
+    const directoryPathMap = new Map<Path, T>();
+
+    return { get, set, clear };
+
+    function clear() {
+        directoryPathMap.clear();
+    }
+
+    function get(directory: string): T | undefined {
+        return directoryPathMap.get(toPath(directory, currentDirectory, getCanonicalFileName));
+    }
+
+    /**
+     * At first this function add entry directory -> module resolution result to the table.
+     * Then it computes the set of parent folders for 'directory' that should have the same module resolution result
+     * and for every parent folder in set it adds entry: parent -> module resolution. .
+     * Lets say we first directory name: /a/b/c/d/e and resolution result is: /a/b/bar.ts.
+     * Set of parent folders that should have the same result will be:
+     * [
+     *     /a/b/c/d, /a/b/c, /a/b
+     * ]
+     * this means that request for module resolution from file in any of these folder will be immediately found in cache.
+     */
+    function set(directory: string, result: T): void {
+        const path = toPath(directory, currentDirectory, getCanonicalFileName);
+        // if entry is already in cache do nothing
+        if (directoryPathMap.has(path)) {
+            return;
+        }
+        directoryPathMap.set(path, result);
+
+        const resolvedFileName = getResolvedFileName(result);
+        // find common prefix between directory and resolved file name
+        // this common prefix should be the shortest path that has the same resolution
+        // directory: /a/b/c/d/e
+        // resolvedFileName: /a/b/foo.d.ts
+        // commonPrefix: /a/b
+        // for failed lookups cache the result for every directory up to root
+        const commonPrefix = resolvedFileName && getCommonPrefix(path, resolvedFileName);
+        let current = path;
+        while (current !== commonPrefix) {
+            const parent = getDirectoryPath(current);
+            if (parent === current || directoryPathMap.has(parent)) {
+                break;
+            }
+            directoryPathMap.set(parent, result);
+            current = parent;
+        }
+    }
+
+    function getCommonPrefix(directory: Path, resolution: string) {
+        const resolutionDirectory = toPath(getDirectoryPath(resolution), currentDirectory, getCanonicalFileName);
+
+        // find first position where directory and resolution differs
+        let i = 0;
+        const limit = Math.min(directory.length, resolutionDirectory.length);
+        while (i < limit && directory.charCodeAt(i) === resolutionDirectory.charCodeAt(i)) {
+            i++;
+        }
+        if (i === directory.length && (resolutionDirectory.length === i || resolutionDirectory[i] === directorySeparator)) {
+            return directory;
+        }
+        const rootLength = getRootLength(directory);
+        if (i < rootLength) {
+            return undefined;
+        }
+        const sep = directory.lastIndexOf(directorySeparator, i - 1);
+        if (sep === -1) {
+            return undefined;
+        }
+        return directory.substr(0, Math.max(sep, rootLength));
+    }
+}
+
 function createNonRelativeNameResolutionCache<T>(
     currentDirectory: string,
     getCanonicalFileName: (s: string) => string,
@@ -1190,74 +1302,7 @@ function createNonRelativeNameResolutionCache<T>(
     }
 
     function createPerModuleNameCache(): PerNonRelativeNameCache<T> {
-        const directoryPathMap = new Map<Path, T>();
-
-        return { get, set };
-
-        function get(directory: string): T | undefined {
-            return directoryPathMap.get(toPath(directory, currentDirectory, getCanonicalFileName));
-        }
-
-        /**
-         * At first this function add entry directory -> module resolution result to the table.
-         * Then it computes the set of parent folders for 'directory' that should have the same module resolution result
-         * and for every parent folder in set it adds entry: parent -> module resolution. .
-         * Lets say we first directory name: /a/b/c/d/e and resolution result is: /a/b/bar.ts.
-         * Set of parent folders that should have the same result will be:
-         * [
-         *     /a/b/c/d, /a/b/c, /a/b
-         * ]
-         * this means that request for module resolution from file in any of these folder will be immediately found in cache.
-         */
-        function set(directory: string, result: T): void {
-            const path = toPath(directory, currentDirectory, getCanonicalFileName);
-            // if entry is already in cache do nothing
-            if (directoryPathMap.has(path)) {
-                return;
-            }
-            directoryPathMap.set(path, result);
-
-            const resolvedFileName = getResolvedFileName(result);
-            // find common prefix between directory and resolved file name
-            // this common prefix should be the shortest path that has the same resolution
-            // directory: /a/b/c/d/e
-            // resolvedFileName: /a/b/foo.d.ts
-            // commonPrefix: /a/b
-            // for failed lookups cache the result for every directory up to root
-            const commonPrefix = resolvedFileName && getCommonPrefix(path, resolvedFileName);
-            let current = path;
-            while (current !== commonPrefix) {
-                const parent = getDirectoryPath(current);
-                if (parent === current || directoryPathMap.has(parent)) {
-                    break;
-                }
-                directoryPathMap.set(parent, result);
-                current = parent;
-            }
-        }
-
-        function getCommonPrefix(directory: Path, resolution: string) {
-            const resolutionDirectory = toPath(getDirectoryPath(resolution), currentDirectory, getCanonicalFileName);
-
-            // find first position where directory and resolution differs
-            let i = 0;
-            const limit = Math.min(directory.length, resolutionDirectory.length);
-            while (i < limit && directory.charCodeAt(i) === resolutionDirectory.charCodeAt(i)) {
-                i++;
-            }
-            if (i === directory.length && (resolutionDirectory.length === i || resolutionDirectory[i] === directorySeparator)) {
-                return directory;
-            }
-            const rootLength = getRootLength(directory);
-            if (i < rootLength) {
-                return undefined;
-            }
-            const sep = directory.lastIndexOf(directorySeparator, i - 1);
-            if (sep === -1) {
-                return undefined;
-            }
-            return directory.substr(0, Math.max(sep, rootLength));
-        }
+        return createPerNonRelativeNameCache(currentDirectory, getCanonicalFileName, getResolvedFileName);
     }
 }
 
@@ -2377,6 +2422,67 @@ export interface PackageJsonInfoContents {
     peerDependencies: string | false | undefined;
 }
 
+/** @internal */
+export function getPackageScope(
+    dir: string,
+    packageJsonInfoCache: PackageJsonInfoCache | undefined,
+    host: ModuleResolutionHost,
+    options: CompilerOptions,
+): PackageJsonScope {
+    const state = getTemporaryModuleResolutionState(packageJsonInfoCache, host, options);
+    let failedLookupLocations: string[] | undefined = [];
+    const affectingLocations: string[] = [];
+    state.failedLookupLocations = failedLookupLocations;
+    state.affectingLocations = affectingLocations;
+    let packageJsonInfo: PackageJsonInfo | undefined;
+    let resultOrFoundPackageJsonInfo = forEachAncestorDirectory(dir, directory => {
+        const fromCache = packageJsonInfoCache?.getPackageJsonScope(directory);
+        if (fromCache) {
+            const { host, traceEnabled } = state;
+            if (traceEnabled) {
+                trace(
+                    host,
+                    fromCache.contents ?
+                        Diagnostics.Directory_0_resolves_to_1_scope_according_to_cache :
+                        Diagnostics.Directory_0_has_no_containing_package_json_scope_according_to_cache,
+                    directory,
+                    getPackageJsonLocationFromScope(fromCache),
+                );
+            }
+            return fromCache;
+        }
+
+        packageJsonInfo = getPackageJsonInfo(directory, /*onlyRecordFailures*/ false, state);
+        if (packageJsonInfo?.contents) return false as const;
+    });
+
+    if (resultOrFoundPackageJsonInfo) {
+        if (!resultOrFoundPackageJsonInfo.contents) failedLookupLocations = undefined;
+        if (!packageJsonInfoCache!.isReadonly) {
+            resultOrFoundPackageJsonInfo.failedLookupLocations = updateResolutionField(resultOrFoundPackageJsonInfo.failedLookupLocations, failedLookupLocations);
+            packageJsonInfoCache!.setPackageJsonScope(dir, resultOrFoundPackageJsonInfo);
+        }
+        else {
+            resultOrFoundPackageJsonInfo = {
+                ...resultOrFoundPackageJsonInfo,
+                failedLookupLocations: initializeResolutionFieldForReadonlyCache(resultOrFoundPackageJsonInfo.failedLookupLocations, failedLookupLocations),
+                affectingLocations: resultOrFoundPackageJsonInfo.affectingLocations?.slice(),
+            };
+        }
+        return resultOrFoundPackageJsonInfo;
+    }
+
+    resultOrFoundPackageJsonInfo = {
+        contents: packageJsonInfo?.contents,
+        failedLookupLocations: initializeResolutionField(packageJsonInfo?.contents ? failedLookupLocations : undefined),
+        affectingLocations: initializeResolutionField(affectingLocations),
+    };
+    if (packageJsonInfoCache && !packageJsonInfoCache.isReadonly) {
+        packageJsonInfoCache.setPackageJsonScope(dir, resultOrFoundPackageJsonInfo);
+    }
+    return resultOrFoundPackageJsonInfo;
+}
+
 /**
  * A function for locating the package.json scope for a given path
  *
@@ -2568,8 +2674,7 @@ function noKeyStartsWithDot(obj: MapLike<unknown>) {
 }
 
 function loadModuleFromSelfNameReference(extensions: Extensions, moduleName: string, directory: string, state: ModuleResolutionState, cache: ModuleResolutionCache | undefined, redirectedReference: ResolvedProjectReference | undefined): SearchResult<Resolved> {
-    const directoryPath = getNormalizedAbsolutePath(combinePaths(directory, "dummy"), state.host.getCurrentDirectory?.());
-    const scope = getPackageScopeForPath(directoryPath, state);
+    const scope = getPackageScopeForPath(getNormalizedAbsolutePath(directory, state.host.getCurrentDirectory?.()), state);
     if (!scope || !scope.contents.packageJsonContent.exports) {
         return undefined;
     }
@@ -2649,8 +2754,8 @@ function loadModuleFromImports(extensions: Extensions, moduleName: string, direc
         }
         return toSearchResult(/*value*/ undefined);
     }
-    const directoryPath = getNormalizedAbsolutePath(combinePaths(directory, "dummy"), state.host.getCurrentDirectory?.());
-    const scope = getPackageScopeForPath(directoryPath, state);
+    const directoryPath = getNormalizedAbsolutePath(directory, state.host.getCurrentDirectory?.());
+    const scope = getPackageScopeForPath(getNormalizedAbsolutePath(directory, state.host.getCurrentDirectory?.()), state);
     if (!scope) {
         if (state.traceEnabled) {
             trace(state.host, Diagnostics.Directory_0_has_no_containing_package_json_scope_Imports_will_not_resolve, directoryPath);

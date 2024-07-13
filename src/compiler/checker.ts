@@ -79,7 +79,6 @@ import {
     classOrConstructorParameterIsDecorated,
     ClassStaticBlockDeclaration,
     clear,
-    combinePaths,
     compareDiagnostics,
     comparePaths,
     compareValues,
@@ -344,6 +343,7 @@ import {
     getObjectFlags,
     getOriginalNode,
     getOrUpdate,
+    getPackageJsonLocationFromScope,
     getParameterSymbolFromJSDoc,
     getParseTreeNode,
     getPropertyAssignmentAliasLikeExpression,
@@ -4628,20 +4628,20 @@ export function createTypeChecker(host: TypeCheckerHost): TypeChecker {
                             if (ext === Extension.Ts || ext === Extension.Js || ext === Extension.Tsx || ext === Extension.Jsx) {
                                 const scope = currentSourceFile.packageJsonScope;
                                 const targetExt = ext === Extension.Ts ? Extension.Mts : ext === Extension.Js ? Extension.Mjs : undefined;
-                                if (scope && !scope.contents.packageJsonContent.type) {
+                                if (scope?.contents && !scope.contents.packageJsonContent.type) {
                                     if (targetExt) {
                                         diagnosticDetails = chainDiagnosticMessages(
                                             /*details*/ undefined,
                                             Diagnostics.To_convert_this_file_to_an_ECMAScript_module_change_its_file_extension_to_0_or_add_the_field_type_Colon_module_to_1,
                                             targetExt,
-                                            combinePaths(scope.packageDirectory, "package.json"),
+                                            getPackageJsonLocationFromScope(scope)!,
                                         );
                                     }
                                     else {
                                         diagnosticDetails = chainDiagnosticMessages(
                                             /*details*/ undefined,
                                             Diagnostics.To_convert_this_file_to_an_ECMAScript_module_add_the_field_type_Colon_module_to_0,
-                                            combinePaths(scope.packageDirectory, "package.json"),
+                                            getPackageJsonLocationFromScope(scope)!,
                                         );
                                     }
                                 }

@@ -13,6 +13,7 @@ import {
     PackageJsonInfo,
     PackageJsonInfoCache,
     Pattern,
+    SourceFilePackageJsonInfo,
     SymlinkCache,
     ThisContainer,
 } from "./_namespaces/ts.js";
@@ -4247,11 +4248,10 @@ export interface SourceFileLike {
 }
 
 /** @internal */
-export interface FutureSourceFile {
+export interface FutureSourceFile extends SourceFilePackageJsonInfo {
     readonly path: Path;
     readonly fileName: string;
     readonly impliedNodeFormat?: ResolutionMode;
-    readonly packageJsonScope?: PackageJsonInfo;
     readonly externalModuleIndicator?: true | undefined;
     readonly commonJsModuleIndicator?: true | undefined;
     readonly statements: readonly never[];
@@ -4348,8 +4348,6 @@ export interface SourceFile extends Declaration, LocalsContainer {
      * CommonJS-output-format by the node module transformer and type checker, regardless of extension or context.
      */
     impliedNodeFormat?: ResolutionMode;
-    /** @internal */ packageJsonLocations?: readonly string[];
-    /** @internal */ packageJsonScope?: PackageJsonInfo;
 
     /** @internal */ scriptKind: ScriptKind;
 
@@ -4415,6 +4413,10 @@ export interface SourceFile extends Declaration, LocalsContainer {
     /** @internal */ endFlowNode?: FlowNode;
 
     /** @internal */ jsDocParsingMode?: JSDocParsingMode;
+}
+
+/** @internal */
+export interface SourceFile extends SourceFilePackageJsonInfo {
 }
 
 /** @internal */
